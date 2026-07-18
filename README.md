@@ -35,29 +35,52 @@ Wait until `docker compose ps` shows all services healthy (first start: images b
 
 ## Quick start (without Docker — e.g. this devcontainer)
 
-Running a Docker daemon inside a container requires privileged mode, so in devcontainer-style environments run the services natively:
+Running a Docker daemon inside a container requires privileged mode, so in devcontainer-style environments run the services natively.
+
+**1. One-time setup** — install infrastructure and the services:
 
 ```bash
-# One-time: install and start infrastructure
+# Infrastructure: Postgres, Redis, NGINX
 sudo apt-get install -y postgresql redis-server nginx
 sudo service postgresql start && sudo service redis-server start
 sudo su postgres -c "psql -c \"CREATE ROLE shortener LOGIN PASSWORD 'shortener'\" -c 'CREATE DATABASE shortener OWNER shortener'"
 
-# One-time: install the services into a shared virtualenv
+# The three Python services, in one shared virtualenv
 python3 -m venv .venv
 .venv/bin/pip install -e shortener-service -e redirect-service -e analytics-worker
+```
 
-# Every run: migrations, then the four components
+**2. Start the stack** (migrations, three services, gateway):
+
+```bash
 export DATABASE_URL='postgresql+asyncpg://shortener:shortener@localhost:5432/shortener' \
        REDIS_URL='redis://localhost:6379/0' BASE_URL='http://localhost:8080'
 (cd shortener-service && ../.venv/bin/alembic upgrade head)
-.venv/bin/uvicorn shortener_service.main:app --port 8001 > /tmp/shortener-service.log 2>&1 &
-.venv/bin/uvicorn redirect_service.main:app --port 8002 > /tmp/redirect-service.log 2>&1 &
+.venv/bin/uvicorn shortener_service.main:app --host 127.0.0.1 --port 8001 > /tmp/shortener-service.log 2>&1 &
+.venv/bin/uvicorn redirect_service.main:app --host 127.0.0.1 --port 8002 > /tmp/redirect-service.log 2>&1 &
 .venv/bin/python -m analytics_worker.main > /tmp/analytics-worker.log 2>&1 &
-nginx -c "$PWD/.local-dev/nginx-local.conf"   # gateway on :8080 (see note below)
+nginx -c "$PWD/.local-dev/nginx-local.conf"   # gateway on :8080
 ```
 
-The `.local-dev/nginx-local.conf` gateway config (same routing as the Docker gateway, localhost upstreams) is untracked scaffolding for this mode; recreate it from [gateway/nginx.conf](gateway/nginx.conf) by pointing the upstreams at `127.0.0.1:8001/8002` if missing.
+[.local-dev/nginx-local.conf](.local-dev/nginx-local.conf) is the tracked local variant of [gateway/nginx.conf](gateway/nginx.conf): identical routing, localhost upstreams, `/tmp` paths so no system directories are touched.
+
+**3. Verify it's up** — each service reports its health and running version:
+
+```bash
+curl http://localhost:8080/healthz          # gateway         -> ok
+curl http://127.0.0.1:8001/healthz          # shortener       -> {"status":"ok","database":"ok","version":"1.1.0"}
+curl http://127.0.0.1:8002/healthz          # redirect        -> {"status":"ok","version":"1.1.0","database":"ok","cache":"ok"}
+tail -1 /tmp/analytics-worker.log           # worker startup log line
+```
+
+Then exercise it end to end with the API calls in [Using the API](#using-the-api) below. Service logs: `/tmp/shortener-service.log`, `/tmp/redirect-service.log`, `/tmp/analytics-worker.log`.
+
+**4. Stop everything**:
+
+```bash
+pkill -f 'uvicorn (shortener|redirect)_service' ; pkill -f 'analytics_worker.main'
+nginx -c "$PWD/.local-dev/nginx-local.conf" -s quit
+```
 
 ## Using the API
 
