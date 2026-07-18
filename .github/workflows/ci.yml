@@ -14,14 +14,25 @@ on:
 
 jobs:
   # Detect which service directories changed so we only test what moved.
+  # Manual dispatches and release tags skip change detection and run the
+  # full pipeline: releases must validate and package everything.
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      services: ${{ steps.filter.outputs.changes }}
-      e2e_needed: ${{ steps.e2e.outputs.needed }}
+      services: ${{ steps.full.outputs.force == 'true' && '["shortener-service","redirect-service","analytics-worker"]' || steps.filter.outputs.changes }}
+      e2e_needed: ${{ steps.full.outputs.force == 'true' && 'true' || steps.e2e.outputs.needed }}
     steps:
+      - id: full
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "force=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "force=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.full.outputs.force != 'true'
       - uses: dorny/paths-filter@v3
+        if: steps.full.outputs.force != 'true'
         id: filter
         with:
           filters: |
@@ -32,6 +43,7 @@ jobs:
             analytics-worker:
               - 'analytics-worker/**'
       - uses: dorny/paths-filter@v3
+        if: steps.full.outputs.force != 'true'
         id: infra
         with:
           filters: |
@@ -41,6 +53,7 @@ jobs:
               - 'docker-compose.deploy.yml'
               - '.github/workflows/**'
       - id: e2e
+        if: steps.full.outputs.force != 'true'
         run: |
           if [ "${{ steps.filter.outputs.changes }}" != "[]" ] || [ "${{ steps.infra.outputs.infra }}" = "true" ]; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
@@ -131,7 +144,7 @@ jobs:
   publish-images:
     needs: [detect-changes, unit-tests, e2e-tests]
     if: >-
-      ${{ !cancelled() && github.event_name == 'push' &&
+      ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
           (needs.e2e-tests.result == 'success' || needs.e2e-tests.result == 'skipped') &&
           (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
           (startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'dev' || github.ref_name == 'stage') }}
