@@ -13,6 +13,3 @@ coverage.xml
 # The e2e test suite is its own repository (separate tests monorepo).
 /url-shortener-e2e-tests/
 
-# Local working notes, never pushed.
-/IMPLEMENTATION_NOTES.md
-
