@@ -25,8 +25,9 @@ A production-grade URL shortener built as four cooperating microservices. It acc
 ```mermaid
 flowchart LR
     Client((Client)) --> Gateway["NGINX API Gateway :8080"]
-    Gateway -->|"POST /api/v1/urls and metadata"| Shortener["shortener-service (write side)"]
-    Gateway -->|"GET /{alias} redirects"| Redirect["redirect-service (read side)"]
+    Gateway -->|"create: POST /api/v1/urls"| Shortener["shortener-service (write side)"]
+    Gateway -->|"metadata: GET /api/v1/urls/{alias}"| Shortener
+    Gateway -->|"redirect: GET /{alias}"| Redirect["redirect-service (read side)"]
     Shortener -->|"atomic INSERT ... ON CONFLICT"| Postgres[(PostgreSQL)]
     Redirect -->|"1: cache lookup"| Redis[(Redis)]
     Redirect -->|"2: on cache miss"| Postgres
