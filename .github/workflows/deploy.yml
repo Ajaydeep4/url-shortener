@@ -26,8 +26,9 @@ concurrency:
 
 jobs:
   resolve-target:
-    # Only deploy after a fully green CI run on a deployable ref.
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    # Only deploy after a fully green CI run on a deployable ref. Manual CI
+    # dispatches count too (used while push-triggered runs are unavailable).
+    if: ${{ github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     outputs:
       environment: ${{ steps.map.outputs.environment }}
