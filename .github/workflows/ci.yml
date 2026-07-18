@@ -10,6 +10,7 @@ on:
     tags: ["v*.*.*"]
   pull_request:
     branches: [dev, stage, main]
+  workflow_dispatch:
 
 jobs:
   # Detect which service directories changed so we only test what moved.
