@@ -355,7 +355,7 @@ GitHub Actions (`.github/workflows/ci.yml`), following the monorepo pattern with
 
 1. **detect-changes** — `dorny/paths-filter` computes which service directories the push/PR touched, so only affected services are built and tested (path filtering keeps monorepo CI as focused as per-repo CI).
 2. **unit-tests** — a dynamic matrix job per changed service: install with dev dependencies, run pytest with the 100% coverage gate, upload the HTML/XML coverage report as an artifact.
-3. **e2e-tests** — builds every Docker image, boots the full stack with `docker compose up`, waits for gateway health, checks out the separate e2e-tests repository, and runs the suite against `http://localhost:8080`. Service logs are dumped on failure. This job is also what validates the Dockerfiles and compose file on every change.
+3. **e2e-tests** — builds every Docker image, boots the full stack with `docker compose up`, waits for gateway health, checks out the separate `url-shortener-e2e-tests` repository, and runs the suite against `http://localhost:8080`. Service logs are dumped on failure. This job is also what validates the Dockerfiles and compose file on every change.
 4. **publish-images** (CD) — on push to `main` with green tests: builds and pushes each changed service's image to GitHub Container Registry, tagged with the commit SHA and `latest`. These images are the deployable artifacts.
 
 The pipeline's role: an enforced quality gate (no human has to remember to run tests) plus an artifact factory (the exact code that passed tests is what gets packaged for deployment).

@@ -9,8 +9,11 @@ coverage.xml
 .coverage
 
 # The e2e test suite is its own repository (separate tests monorepo).
-/e2e-tests/
+/url-shortener-e2e-tests/
 
 # Local-only helpers for running without Docker in the devcontainer.
 /.local-dev/
+
+# Local working notes, never pushed.
+/IMPLEMENTATION_NOTES.md
 

@@ -92,8 +92,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # The e2e suite lives in its own repository (separate tests monorepo).
-      - name: Check out e2e-tests repository
+      # The e2e suite lives in its own repository (separate tests monorepo);
+      # "path" below is only the checkout directory inside the CI workspace.
+      - name: Check out url-shortener-e2e-tests repository
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/url-shortener-e2e-tests

@@ -120,7 +120,7 @@ Every push/PR triggers [ci.yml](.github/workflows/ci.yml):
 
 1. **detect-changes** — path filtering figures out which services changed.
 2. **unit-tests** — matrix job per changed service; 100% coverage enforced; reports uploaded as artifacts.
-3. **e2e-tests** — builds all images, boots the compose stack, clones the e2e repo, runs the suite through the gateway.
+3. **e2e-tests** — builds all images, boots the compose stack, clones the `url-shortener-e2e-tests` repo, runs the suite through the gateway.
 4. **publish-images** — on `main`, pushes changed services' images to GitHub Container Registry (`ghcr.io/<owner>/<repo>/<service>:<sha>`).
 
 ## Deployment (DigitalOcean)
