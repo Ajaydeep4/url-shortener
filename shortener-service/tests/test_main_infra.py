@@ -28,7 +28,11 @@ async def test_healthz_ok(monkeypatch):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         response = await c.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "database": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "database": "ok",
+        "version": main.SERVICE_VERSION,
+    }
 
 
 async def test_healthz_unhealthy_when_db_down(monkeypatch):

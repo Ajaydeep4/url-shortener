@@ -4,6 +4,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from importlib.metadata import version as pkg_version
 
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -15,6 +16,10 @@ from redirect_service.db import dispose_engine, fetch_url, get_engine
 from redirect_service.logging_config import configure_logging, request_id_var
 
 logger = logging.getLogger(__name__)
+
+# Single platform version, stamped into pyproject.toml by scripts/release.sh;
+# surfaced via /healthz so any environment can be asked what it is running.
+SERVICE_VERSION = pkg_version("redirect-service")
 
 ALIAS_PATH_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
@@ -73,14 +78,17 @@ def _not_found(alias: str) -> JSONResponse:
 
 @app.get("/healthz", include_in_schema=False)
 async def healthz() -> JSONResponse:
-    status: dict[str, str] = {}
+    status: dict[str, str] = {"version": SERVICE_VERSION}
     try:
         async with get_engine().connect() as conn:
             await conn.execute(text("SELECT 1"))
         status["database"] = "ok"
     except Exception:
         logger.exception("health check failed: database unreachable")
-        return JSONResponse(status_code=503, content={"status": "unhealthy", "database": "error"})
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "database": "error", "version": SERVICE_VERSION},
+        )
     # Redis being down only degrades performance (cache misses, lost click
     # events), it does not stop redirects, so it never fails the health check.
     try:

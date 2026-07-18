@@ -15,8 +15,13 @@ The system lives in **two repositories** (industry-standard split):
 | [shortener-service/](shortener-service/) | Write side: create short URLs (custom alias + TTL support), metadata, owns DB schema |
 | [redirect-service/](redirect-service/) | Read side: cache-accelerated redirects, expiry enforcement, click events |
 | [analytics-worker/](analytics-worker/) | Consumes click events, maintains access counts |
-| [docker-compose.yml](docker-compose.yml) | Brings up the entire stack |
-| [.github/workflows/ci.yml](.github/workflows/ci.yml) | CI/CD: per-service tests + coverage gate, e2e, image publishing |
+| [docker-compose.yml](docker-compose.yml) | Brings up the entire stack (local, builds from source) |
+| [docker-compose.deploy.yml](docker-compose.deploy.yml) | Deployment override: pulls versioned GHCR images, env-file config |
+| [deploy/](deploy/) | Per-environment env-file templates (dev/stage/prod) |
+| [scripts/](scripts/) | `release.sh` (version bump) and `provision-droplet.sh` (DigitalOcean setup) |
+| [.github/workflows/ci.yml](.github/workflows/ci.yml) | CI: per-service tests + coverage gate, e2e, image publishing |
+| [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | CD: deploys dev/stage/prod droplets after green CI |
+| [CHANGELOG.md](CHANGELOG.md) / [VERSION](VERSION) | Platform version history (Keep a Changelog + semver) |
 
 ## Quick start (Docker)
 
@@ -114,18 +119,57 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/pytest -v          # targets http://localhost:8080 (override: GATEWAY_URL)
 ```
 
+## Branching model (GitLab Flow with environment branches)
+
+| Branch | Role | Deploys to |
+|---|---|---|
+| `feature/*` | Day-to-day work; PRs into `dev` | — (CI only) |
+| `dev` | Integration branch | dev droplet, automatically |
+| `stage` | Pre-production; promoted from `dev` by PR | stage droplet, automatically |
+| `main` | Production history; promoted from `stage` by a release PR | prod droplet, on `vX.Y.Z` tag + manual approval |
+| `hotfix/*` | Urgent fixes cut from `main`, tagged as a patch release, back-merged to `dev`/`stage` | prod (via tag) |
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:` ...) so changelog entries map one-to-one to commits.
+
+## Versioning and releases
+
+The platform is versioned **as a single unit** (one semver spans all services, because the compose stack deploys as one unit): source of truth is [VERSION](VERSION) + the `vX.Y.Z` git tag; history lives in [CHANGELOG.md](CHANGELOG.md). Every service reports its version at runtime via `/healthz`, so any environment can be asked what it is running.
+
+Cutting a release:
+
+```bash
+git checkout stage && git pull
+./scripts/release.sh 1.2.0        # bumps VERSION, pyprojects, CHANGELOG
+git checkout -b release/v1.2.0 && git add -A && git commit -m "chore(release): v1.2.0"
+# open PR release/v1.2.0 -> main; after it merges:
+git tag v1.2.0 main && git push origin v1.2.0    # triggers the prod deploy
+```
+
 ## CI/CD
 
-Every push/PR triggers [ci.yml](.github/workflows/ci.yml):
+**CI** ([ci.yml](.github/workflows/ci.yml)) runs on every PR and push to `dev`/`stage`/`main`:
 
 1. **detect-changes** — path filtering figures out which services changed.
 2. **unit-tests** — matrix job per changed service; 100% coverage enforced; reports uploaded as artifacts.
 3. **e2e-tests** — builds all images, boots the compose stack, clones the `url-shortener-e2e-tests` repo, runs the suite through the gateway.
-4. **publish-images** — on `main`, pushes changed services' images to GitHub Container Registry (`ghcr.io/<owner>/<repo>/<service>:<sha>`).
+4. **publish-images** — on `dev`/`stage` pushes and `v*` tags, pushes **all** images to GHCR tagged `:<sha>` plus `:dev`/`:stage` (moving) or `:vX.Y.Z` + `:latest` (immutable).
+
+**CD** ([deploy.yml](.github/workflows/deploy.yml)) runs after a green CI run: `dev` push → dev droplet, `stage` push → stage droplet, `vX.Y.Z` tag → prod droplet **after a human approves** (GitHub Environment protection). Each deploy SSHes to the droplet, pins `IMAGE_TAG`, runs `compose pull && up -d`, then smoke-tests from outside (health check + create-and-follow a real short link).
 
 ## Deployment (DigitalOcean)
 
-CI already produces deployable images in GHCR. To deploy on DigitalOcean: create a droplet with Docker (or use App Platform), copy `docker-compose.yml`, replace the `build:` entries with the GHCR `image:` references, point `DATABASE_URL`/`REDIS_URL` at managed Postgres/Redis, and `docker compose up -d`. (Not executed from this environment — no DigitalOcean credentials; `doctl auth init` first.)
+Three droplets (dev/stage/prod), each running the same compose stack from GHCR images. One-time setup per environment, once you have credentials (`doctl auth init`):
+
+```bash
+export GHCR_USER=<github-user> GHCR_TOKEN=<PAT with read:packages>
+./scripts/provision-droplet.sh dev      # also: stage, prod
+```
+
+The script creates the droplet (Docker marketplace image), a cloud firewall (22/80/443), a non-root `deploy` user, lays out `/opt/url-shortener`, and logs in to GHCR. It prints the three secrets (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`) to set on the matching GitHub Environment — after that, deploys are fully automatic.
+
+**Rollback**: prod images are immutable version tags, so rolling back is redeploying the previous version — on the droplet: `sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=v1.1.0/' deploy/app.env && docker compose --env-file deploy/app.env -f docker-compose.yml -f docker-compose.deploy.yml up -d` (or re-run the deploy workflow for the previous tag).
+
+**Scale path** (no code changes required): resize the droplet → move Postgres/Redis to DO Managed databases (edit `DATABASE_URL`/`REDIS_URL` in the env file) → add a second droplet behind a DO Load Balancer → DOKS if multi-node autoscaling ever becomes necessary. Rationale in [DESIGN.md](DESIGN.md).
 
 ## Operations
 

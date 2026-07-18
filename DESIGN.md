@@ -15,8 +15,9 @@ A production-grade URL shortener built as four cooperating microservices. It acc
 9. [Data model](#9-data-model)
 10. [Testing strategy and coverage](#10-testing-strategy-and-coverage)
 11. [CI/CD pipeline](#11-cicd-pipeline)
-12. [Requirements coverage](#12-requirements-coverage)
-13. [Trade-offs and future work](#13-trade-offs-and-future-work)
+12. [Deployment, environments, and release engineering](#12-deployment-environments-and-release-engineering)
+13. [Requirements coverage](#13-requirements-coverage)
+14. [Trade-offs and future work](#14-trade-offs-and-future-work)
 
 ---
 
@@ -353,18 +354,72 @@ Two-layer strategy, following the industry-standard split:
 
 ## 11. CI/CD pipeline
 
-GitHub Actions (`.github/workflows/ci.yml`), following the monorepo pattern with change detection:
+Two GitHub Actions workflows: `ci.yml` (quality gate + artifact factory) and `deploy.yml` (environment delivery).
 
-1. **detect-changes** — `dorny/paths-filter` computes which service directories the push/PR touched, so only affected services are built and tested (path filtering keeps monorepo CI as focused as per-repo CI).
+**CI** (`.github/workflows/ci.yml`), on every PR and push to `dev`/`stage`/`main` and on `v*` tags:
+
+1. **detect-changes** — `dorny/paths-filter` computes which service directories the push/PR touched, so only affected services are tested (path filtering keeps monorepo CI as focused as per-repo CI).
 2. **unit-tests** — a dynamic matrix job per changed service: install with dev dependencies, run pytest with the 100% coverage gate, upload the HTML/XML coverage report as an artifact.
 3. **e2e-tests** — builds every Docker image, boots the full stack with `docker compose up`, waits for gateway health, checks out the separate `url-shortener-e2e-tests` repository, and runs the suite against `http://localhost:8080`. Service logs are dumped on failure. This job is also what validates the Dockerfiles and compose file on every change.
-4. **publish-images** (CD) — on push to `main` with green tests: builds and pushes each changed service's image to GitHub Container Registry, tagged with the commit SHA and `latest`. These images are the deployable artifacts.
+4. **publish-images** — on pushes to `dev`/`stage` and on release tags, with green tests: builds and pushes **all four images** (three services + gateway) to GitHub Container Registry. All images are published together — never just the changed ones — so every branch/version tag names a complete, consistent image set; an environment can never mix a fresh gateway with a stale service.
 
-The pipeline's role: an enforced quality gate (no human has to remember to run tests) plus an artifact factory (the exact code that passed tests is what gets packaged for deployment).
+**Image tag scheme** — how a Git ref maps to what registries and droplets see:
+
+| Git event | Image tags pushed | Nature |
+|---|---|---|
+| push to `dev` | `:<sha>`, `:dev` | moving branch tag |
+| push to `stage` | `:<sha>`, `:stage` | moving branch tag |
+| tag `vX.Y.Z` | `:<sha>`, `:vX.Y.Z`, `:latest` | immutable release |
+
+**CD** (`.github/workflows/deploy.yml`) is triggered by a *completed, green* CI run (`workflow_run`), never directly by a push — deploys cannot outrun tests. It maps the ref to a GitHub Environment (`dev` branch → dev, `stage` → stage, `vX.Y.Z` tag → prod), SSHes into that environment's droplet, pins `IMAGE_TAG` in the env file, runs `docker compose pull && up -d`, and then smoke-tests from the outside: health check plus a real create-link-and-follow-redirect round trip. The prod environment carries a required-reviewers protection rule, so production deploys wait for a human click. A concurrency group per ref prevents overlapping deploys to the same environment.
+
+The pipeline's role: an enforced quality gate (no human has to remember to run tests), an artifact factory (the exact code that passed tests is what gets packaged), and a delivery mechanism where promotion is a Git operation (merge/tag), not a manual server procedure.
 
 ---
 
-## 12. Requirements coverage
+## 12. Deployment, environments, and release engineering
+
+### Environments and topology
+
+Three DigitalOcean droplets — **dev**, **stage**, **prod** — each running the identical Compose stack from GHCR images; only the env file (`/opt/url-shortener/deploy/app.env`) differs: image tag, `BASE_URL`, database password, log level. Local development remains `docker compose up --build` (build-from-source); deployed environments layer [docker-compose.deploy.yml](docker-compose.deploy.yml) on top, which swaps `build:` for pinned `image:` references and adds `restart: unless-stopped`. One compose definition everywhere means what was tested is byte-for-byte what runs.
+
+Droplets are provisioned by [scripts/provision-droplet.sh](scripts/provision-droplet.sh): Docker marketplace image, cloud firewall (inbound 22/80/443 only), non-root `deploy` user for CI, GHCR login, `/opt/url-shortener` layout. GitHub Environments hold per-environment secrets (`DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_SSH_KEY`) and the prod approval gate.
+
+### Branch strategy (GitLab Flow with environment branches)
+
+```mermaid
+flowchart LR
+    feature[feature/*] -->|PR + CI| devBranch[dev]
+    devBranch -->|auto-deploy| devEnv[dev droplet]
+    devBranch -->|promotion PR| stageBranch[stage]
+    stageBranch -->|auto-deploy| stageEnv[stage droplet]
+    stageBranch -->|release PR: version + changelog| mainBranch[main]
+    mainBranch -->|tag vX.Y.Z| prodEnv[prod droplet, manual approval]
+    mainBranch -.->|hotfix/*, patch release, back-merge| devBranch
+```
+
+Promotion is always a merge in one direction (`dev` → `stage` → `main`), so anything reaching prod has soaked in two environments. Hotfixes branch from `main`, ship as a patch release, and are back-merged so no fix is ever lost. Trunk-based development with tag-driven deploys is the main industry alternative; environment branches were chosen because they give each long-lived environment an inspectable Git state, which suits a small team promoting deliberately.
+
+### Versioning and changelog
+
+- **One platform version** (semver, e.g. `1.2.0`) spans all services, because the Compose stack is the deployment unit — services never ship independently, so independent per-service versions would be bookkeeping without benefit. If services ever get independent deploy cadences, per-service tags (`shortener-service-v2.0.0`) are the natural evolution.
+- Source of truth: the [VERSION](VERSION) file and the `vX.Y.Z` Git tag; each service's `pyproject.toml` is kept in sync by [scripts/release.sh](scripts/release.sh) (one command: bumps `VERSION`, three pyprojects, and promotes the changelog's `[Unreleased]` section).
+- **[CHANGELOG.md](CHANGELOG.md)** follows Keep a Changelog, with `(service)` prefixes preserving per-service visibility inside the single platform history. Commits follow Conventional Commits (`feat:`/`fix:`/`chore:`) so entries map to commits; automated changelog generation (release-please) is a drop-in later if wanted.
+- **Runtime version visibility**: every service reads its version from installed package metadata and reports it — API services in the `/healthz` response, the worker in its startup log line. `curl https://<env>/healthz` answers "what exactly is running here?", and deploy smoke tests print it.
+- **Rollback** = redeploy the previous immutable version tag (edit `IMAGE_TAG`, `compose up -d`); prod never runs moving tags, so the previous artifact still exists, unchanged.
+
+### Scale path (why a droplet, and what comes after)
+
+Chosen deliberately over App Platform (PaaS) and DOKS (Kubernetes) for this profile — a handful of services, one team, modest traffic: lowest cost, full parity with local Compose, no new orchestration concepts. The services being stateless makes each escalation step config-only:
+
+1. **Vertical**: resize the droplet (a redirect is a Redis `GET`; one box goes far).
+2. **Managed state**: move Postgres → DO Managed PostgreSQL and Redis → Managed Valkey (edit two URLs in the env file). The droplet becomes fully disposable.
+3. **Horizontal**: second droplet running the same stack behind a DO Load Balancer.
+4. **DOKS** only when multi-node autoscaling/rolling deploys are truly needed — images, health checks, env-var config, and migrations all transfer unchanged.
+
+---
+
+## 13. Requirements coverage
 
 Mapping of every requirement from the problem statement to its implementation:
 
@@ -384,11 +439,11 @@ Mapping of every requirement from the problem statement to its implementation:
 | CI/CD: basic pipeline | `.github/workflows/ci.yml` | See section 11 |
 | Documentation: setup, execution, testing | Root `README.md` + per-project READMEs | Docker and native (devcontainer) paths both documented |
 | Extension — Expiration (TTL) | `ttl_seconds` on creation; `expires_at` column (migration `0002`); SQL-filtered lookups; cache TTL capped at remaining lifetime | Expiry enforced in the database query so expired = nonexistent; no cleanup job needed for correctness |
-| Extension — Deployment to DigitalOcean | Prepared, not executed (no account credentials in this environment) | CI already publishes images to GHCR; deploying is running those images on a droplet/App Platform — see README |
+| Extension — Deployment to DigitalOcean | Full pipeline implemented (`deploy.yml`, `docker-compose.deploy.yml`, provisioning script, three environments); droplet creation awaits account credentials (`doctl auth init`) | See section 12 |
 
 ---
 
-## 13. Trade-offs and future work
+## 14. Trade-offs and future work
 
 Decisions made knowingly:
 

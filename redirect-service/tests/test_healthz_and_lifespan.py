@@ -29,7 +29,12 @@ async def test_healthz_all_ok(client, monkeypatch):
         response = await c.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "database": "ok", "cache": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "version": main_module.SERVICE_VERSION,
+        "database": "ok",
+        "cache": "ok",
+    }
 
 
 async def test_healthz_db_down_returns_503(client, monkeypatch):

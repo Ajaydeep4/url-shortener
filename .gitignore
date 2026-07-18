@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .env
 .pytest_cache/
+# Filled-in environment files hold real secrets; only *.env.example is tracked.
+deploy/*.env
 htmlcov/
 coverage.xml
 .coverage

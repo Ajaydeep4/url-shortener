@@ -2,6 +2,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from importlib.metadata import version as pkg_version
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -16,6 +17,10 @@ from shortener_service.exceptions import DomainError
 from shortener_service.logging_config import configure_logging, request_id_var
 
 logger = logging.getLogger(__name__)
+
+# Single platform version, stamped into pyproject.toml by scripts/release.sh;
+# surfaced via /healthz so any environment can be asked what it is running.
+SERVICE_VERSION = pkg_version("shortener-service")
 
 
 @asynccontextmanager
@@ -92,5 +97,8 @@ async def healthz() -> JSONResponse:
             await conn.execute(text("SELECT 1"))
     except Exception:
         logger.exception("health check failed: database unreachable")
-        return JSONResponse(status_code=503, content={"status": "unhealthy", "database": "error"})
-    return JSONResponse(content={"status": "ok", "database": "ok"})
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "database": "error", "version": SERVICE_VERSION},
+        )
+    return JSONResponse(content={"status": "ok", "database": "ok", "version": SERVICE_VERSION})

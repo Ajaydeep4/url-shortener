@@ -1,0 +1,95 @@
+name: Deploy
+
+# Environment promotion:
+#   push to dev    -> deploy dev droplet   (images tagged :dev)
+#   push to stage  -> deploy stage droplet (images tagged :stage)
+#   tag vX.Y.Z     -> deploy prod droplet  (images tagged :vX.Y.Z),
+#                     gated by the "prod" GitHub Environment's required
+#                     reviewers -- a human clicks Approve before it runs.
+#
+# Each GitHub Environment (dev/stage/prod) holds its own secrets:
+#   DEPLOY_HOST      droplet public IP
+#   DEPLOY_USER      ssh user created by the provisioning script (deploy)
+#   DEPLOY_SSH_KEY   private key matching the droplet's authorized key
+#
+# The droplet is prepared by scripts/provision-droplet.sh: compose files and
+# the filled-in env file live in /opt/url-shortener, and the deploy user is
+# already logged in to GHCR for pulls.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+concurrency:
+  group: deploy-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-target:
+    # Only deploy after a fully green CI run on a deployable ref.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.map.outputs.environment }}
+      image_tag: ${{ steps.map.outputs.image_tag }}
+    steps:
+      - id: map
+        run: |
+          REF="${{ github.event.workflow_run.head_branch }}"
+          case "$REF" in
+            dev)     echo "environment=dev"   >> "$GITHUB_OUTPUT"; echo "image_tag=dev"   >> "$GITHUB_OUTPUT" ;;
+            stage)   echo "environment=stage" >> "$GITHUB_OUTPUT"; echo "image_tag=stage" >> "$GITHUB_OUTPUT" ;;
+            v*.*.*)  echo "environment=prod"  >> "$GITHUB_OUTPUT"; echo "image_tag=$REF"  >> "$GITHUB_OUTPUT" ;;
+            *)       echo "environment="      >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  deploy:
+    needs: resolve-target
+    if: ${{ needs.resolve-target.outputs.environment != '' }}
+    runs-on: ubuntu-latest
+    # Binds the job to the dev/stage/prod GitHub Environment: environment
+    # secrets are scoped here, and prod's required-reviewer rule makes this
+    # job wait for manual approval.
+    environment: ${{ needs.resolve-target.outputs.environment }}
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull images and restart the stack
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash -s <<'EOF'
+          set -euo pipefail
+          cd /opt/url-shortener
+          # Pin the tag being deployed (release version for prod, branch tag
+          # for dev/stage) so the env file always records what is running.
+          sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ needs.resolve-target.outputs.image_tag }}|" deploy/app.env
+          docker compose --env-file deploy/app.env \
+            -f docker-compose.yml -f docker-compose.deploy.yml pull
+          docker compose --env-file deploy/app.env \
+            -f docker-compose.yml -f docker-compose.deploy.yml up -d --remove-orphans
+          docker image prune -f
+          EOF
+
+      - name: Smoke test from the outside
+        run: |
+          HOST="${{ secrets.DEPLOY_HOST }}"
+          for i in $(seq 1 30); do
+            if curl -sf "http://$HOST/healthz" > /dev/null; then break; fi
+            [ "$i" = 30 ] && { echo "gateway never became healthy" >&2; exit 1; }
+            sleep 2
+          done
+          # End-to-end: create a link, then follow the redirect.
+          ALIAS="deploy-check-$(date +%s)"
+          curl -sf -X POST "http://$HOST/api/v1/urls" \
+            -H 'Content-Type: application/json' \
+            -d "{\"long_url\": \"https://example.com/deploy-check\", \"custom_alias\": \"$ALIAS\"}" > /dev/null
+          LOCATION=$(curl -s -o /dev/null -w '%{redirect_url}' "http://$HOST/$ALIAS")
+          if [ "$LOCATION" != "https://example.com/deploy-check" ]; then
+            echo "smoke test failed: redirect returned '$LOCATION'" >&2
+            exit 1
+          fi
+          echo "deployed and verified: $(curl -s http://$HOST/healthz)"

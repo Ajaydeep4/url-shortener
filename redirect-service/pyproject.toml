@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "redirect-service"
-version = "1.0.0"
+version = "1.1.0"
 description = "URL shortener read-side service: cache-accelerated redirects and click event publishing."
 requires-python = ">=3.12"
 dependencies = [

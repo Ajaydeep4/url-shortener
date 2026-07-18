@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shortener-service"
-version = "1.0.0"
+version = "1.1.0"
 description = "URL shortener write-side service: creates short URLs and serves metadata."
 requires-python = ">=3.12"
 dependencies = [
