@@ -1,0 +1,88 @@
+name: url-shortener
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shortener
+      POSTGRES_PASSWORD: shortener
+      POSTGRES_DB: shortener
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortener -d shortener"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shortener-service:
+    build: ./shortener-service
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shortener:shortener@postgres:5432/shortener
+      BASE_URL: http://localhost:8080
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  redirect-service:
+    build: ./redirect-service
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shortener:shortener@postgres:5432/shortener
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Waits for shortener-service health (which implies migrations applied)
+      # so the urls table exists before this service takes traffic.
+      shortener-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  analytics-worker:
+    build: ./analytics-worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shortener:shortener@postgres:5432/shortener
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      shortener-service:
+        condition: service_healthy
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      shortener-service:
+        condition: service_healthy
+      redirect-service:
+        condition: service_healthy
+
+volumes:
+  pgdata:

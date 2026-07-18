@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.env
+.pytest_cache/
+htmlcov/
+coverage.xml
+.coverage
+
+# The e2e test suite is its own repository (separate tests monorepo).
+/e2e-tests/
+
+# Local-only helpers for running without Docker in the devcontainer.
+/.local-dev/
+

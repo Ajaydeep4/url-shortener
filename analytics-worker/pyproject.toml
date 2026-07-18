@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "analytics-worker"
+version = "1.0.0"
+description = "Consumes click events from a Redis Stream and applies batched access-count updates to PostgreSQL."
+requires-python = ">=3.12"
+dependencies = [
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "redis>=5.0",
+    "pydantic-settings>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "fakeredis>=2.23",
+]
+
+[tool.setuptools.packages.find]
+include = ["analytics_worker*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=analytics_worker --cov-report=term-missing --cov-fail-under=100"
+
+[tool.coverage.run]
+source = ["analytics_worker"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

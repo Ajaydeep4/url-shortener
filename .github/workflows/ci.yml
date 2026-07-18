@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Detect which service directories changed so we only build/test what moved.
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+      e2e_needed: ${{ steps.e2e.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            shortener-service:
+              - 'shortener-service/**'
+            redirect-service:
+              - 'redirect-service/**'
+            analytics-worker:
+              - 'analytics-worker/**'
+      - uses: dorny/paths-filter@v3
+        id: infra
+        with:
+          filters: |
+            infra:
+              - 'gateway/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+      - id: e2e
+        run: |
+          if [ "${{ steps.filter.outputs.changes }}" != "[]" ] || [ "${{ steps.infra.outputs.infra }}" = "true" ]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Unit tests with a 100% line-coverage gate, one job per changed service.
+  unit-tests:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.services != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ${{ matrix.service }} with dev dependencies
+        working-directory: ${{ matrix.service }}
+        run: pip install -e ".[dev]"
+      - name: Run unit tests (100% coverage enforced)
+        working-directory: ${{ matrix.service }}
+        run: pytest --cov-report=term-missing --cov-report=html --cov-report=xml
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: |
+            ${{ matrix.service }}/htmlcov
+            ${{ matrix.service }}/coverage.xml
+
+  # Full-system test: build every image, boot the stack, drive it via the gateway.
+  e2e-tests:
+    needs: [detect-changes, unit-tests]
+    # Run when anything relevant changed; unit-tests may be skipped entirely
+    # (infra-only change), so accept both success and skipped.
+    if: ${{ !cancelled() && needs.detect-changes.outputs.e2e_needed == 'true' && (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the stack
+        run: docker compose up --build -d
+      - name: Wait for gateway health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/healthz > /dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo "gateway never became healthy" >&2
+          docker compose ps
+          exit 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The e2e suite lives in its own repository (separate tests monorepo).
+      - name: Check out e2e-tests repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/url-shortener-e2e-tests
+          path: e2e-tests
+      - name: Run e2e suite
+        working-directory: e2e-tests
+        run: |
+          pip install -r requirements.txt
+          pytest -v
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # CD: publish images for changed services to GHCR after tests pass on main.
+  publish-images:
+    needs: [detect-changes, unit-tests, e2e-tests]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.e2e-tests.result == 'success' && needs.detect-changes.outputs.services != '[]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}/${{ matrix.service }}"
+          IMAGE="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" ${{ matrix.service }}
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
